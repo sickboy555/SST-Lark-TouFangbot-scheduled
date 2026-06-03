@@ -1,0 +1,36 @@
+name: 每日预算日报
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # UTC 09:00 = 北京时间 17:00
+  workflow_dispatch:      # 允许在 GitHub 网页手动触发
+
+jobs:
+  send-report:
+    runs-on: windows-latest  # 用Windows runner，字体和本地一致
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 发送预算日报
+        run: python lark_budget_bot.py --once
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
+          LARK_SHEET_URL: ${{ secrets.LARK_SHEET_URL }}
+          LARK_OPEN_BASE_URL: https://open.larksuite.com
+          SHEET_RANGE: A1:AZ1000
+          SCHEDULE_TIME: '17:00'
+          TIMEZONE: Asia/Shanghai
+          OUTPUT_DIR: output
