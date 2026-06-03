@@ -25,6 +25,7 @@ jobs:
       - name: 发送预算日报
         run: python lark_budget_bot.py --once
         env:
+          PYTHONUTF8: 1
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
