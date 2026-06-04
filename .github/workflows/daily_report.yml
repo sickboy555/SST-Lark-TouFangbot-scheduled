@@ -7,7 +7,9 @@ on:
 
 jobs:
   send-report:
-    runs-on: windows-latest  # 用Windows runner，字体和本地一致
+    runs-on: windows-2025
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: 拉取代码
