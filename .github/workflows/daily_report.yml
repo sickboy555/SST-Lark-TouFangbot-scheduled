@@ -2,7 +2,7 @@ name: 每日预算日报
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # UTC 09:00 = 北京时间 17:00
+    - cron: '7 9 * * *'  # UTC 09:07 = 北京时间 17:07
   workflow_dispatch:      # 允许在 GitHub 网页手动触发
 
 jobs:
