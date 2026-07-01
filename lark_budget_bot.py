@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -51,16 +54,24 @@ class Config:
     schedule_time: str
     timezone: str
     output_dir: Path
+    send_mode: str
+    webhook_url: str
+    webhook_secret: str
 
     @staticmethod
     def from_env() -> "Config":
         load_dotenv()
+        send_mode = os.getenv("SEND_MODE", "app").strip().lower()
+        if send_mode not in {"app", "webhook"}:
+            raise RuntimeError("SEND_MODE 只能是 app 或 webhook。")
+
         required = {
             "LARK_APP_ID": os.getenv("LARK_APP_ID"),
             "LARK_APP_SECRET": os.getenv("LARK_APP_SECRET"),
-            "LARK_CHAT_ID": os.getenv("LARK_CHAT_ID"),
             "LARK_SHEET_URL": os.getenv("LARK_SHEET_URL"),
         }
+        if send_mode == "app":
+            required["LARK_CHAT_ID"] = os.getenv("LARK_CHAT_ID")
         missing = [k for k, v in required.items() if not v or v.startswith("填入")]
         if missing:
             raise RuntimeError(f"缺少环境变量: {', '.join(missing)}。请先复制 .env.example 为 .env 并填写。")
@@ -68,13 +79,16 @@ class Config:
         return Config(
             app_id=required["LARK_APP_ID"] or "",
             app_secret=required["LARK_APP_SECRET"] or "",
-            chat_id=required["LARK_CHAT_ID"] or "",
+            chat_id=os.getenv("LARK_CHAT_ID", ""),
             sheet_url=required["LARK_SHEET_URL"] or "",
             open_base_url=os.getenv("LARK_OPEN_BASE_URL", "https://open.larksuite.com").rstrip("/"),
             sheet_range=os.getenv("SHEET_RANGE", "A1:AZ1000"),
             schedule_time=os.getenv("SCHEDULE_TIME", "10:00"),
             timezone=os.getenv("TIMEZONE", "Asia/Shanghai"),
             output_dir=Path(os.getenv("OUTPUT_DIR", "output")),
+            send_mode=send_mode,
+            webhook_url=os.getenv("LARK_WEBHOOK_URL", ""),
+            webhook_secret=os.getenv("LARK_WEBHOOK_SECRET", ""),
         )
 
 
@@ -188,6 +202,47 @@ class LarkClient:
         if resp.status_code >= 400 or data.get("code", 0) != 0:
             raise RuntimeError(f"{action}: HTTP {resp.status_code}, {data}")
         return data
+
+
+class LarkWebhookClient:
+    def __init__(self, config: Config):
+        import requests
+
+        if not config.webhook_url or config.webhook_url.startswith("填入"):
+            raise RuntimeError("SEND_MODE=webhook 时必须填写 LARK_WEBHOOK_URL。")
+        self.config = config
+        self.session = requests.Session()
+
+    def send_text(self, text: str) -> None:
+        self._post({"msg_type": "text", "content": {"text": text}})
+
+    def send_image(self, image_key: str) -> None:
+        self._post({"msg_type": "image", "content": {"image_key": image_key}})
+
+    def _post(self, payload: dict[str, Any]) -> None:
+        if self.config.webhook_secret:
+            timestamp = str(int(dt.datetime.now().timestamp()))
+            payload = {
+                **payload,
+                "timestamp": timestamp,
+                "sign": self._sign(timestamp, self.config.webhook_secret),
+            }
+
+        resp = self.session.post(self.config.webhook_url, json=payload, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Webhook 发送失败: HTTP {resp.status_code}, {resp.text[:500]}") from exc
+
+        error_code = data.get("code", data.get("StatusCode", 0))
+        if resp.status_code >= 400 or error_code != 0:
+            raise RuntimeError(f"Webhook 发送失败: HTTP {resp.status_code}, {data}")
+
+    @staticmethod
+    def _sign(timestamp: str, secret: str) -> str:
+        string_to_sign = f"{timestamp}\n{secret}"
+        digest = hmac.new(string_to_sign.encode("utf-8"), b"", hashlib.sha256).digest()
+        return base64.b64encode(digest).decode("utf-8")
 
 
 def parse_sheet_url(url: str) -> SheetRef:
@@ -685,13 +740,14 @@ def run_once(config: Config, send: bool = True) -> Path:
     print(f"对比日期列: {today_label} vs {yesterday_label}")
 
     if send:
-        client.send_text(text)
         image_key = client.upload_image(image_path)
-        client.send_image(image_key)
+        sender = client if config.send_mode == "app" else LarkWebhookClient(config)
+        sender.send_text(text)
+        sender.send_image(image_key)
 
     print(f"生成图片: {image_path}")
     if send:
-        print("已发送到 Lark 群。")
+        print(f"已通过 {config.send_mode} 模式发送到 Lark 群。")
     else:
         print("已跳过发送，仅本地生成。")
     return image_path

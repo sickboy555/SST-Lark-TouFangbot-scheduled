@@ -28,8 +28,10 @@ jobs:
           PYTHONUTF8: 1
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
           LARK_SHEET_URL: ${{ secrets.LARK_SHEET_URL }}
+          SEND_MODE: webhook
+          LARK_WEBHOOK_URL: ${{ secrets.LARK_WEBHOOK_URL }}
+          LARK_WEBHOOK_SECRET: ${{ secrets.LARK_WEBHOOK_SECRET }}
           LARK_OPEN_BASE_URL: https://open.larksuite.com
           SHEET_RANGE: A1:AZ1000
           SCHEDULE_TIME: '17:00'
