@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,9 @@ class Config:
     send_mode: str
     webhook_url: str
     webhook_secret: str
+    stability_retries: int
+    stability_delay_seconds: float
+    filter_zero_rows: bool
 
     @staticmethod
     def from_env() -> "Config":
@@ -89,6 +93,9 @@ class Config:
             send_mode=send_mode,
             webhook_url=os.getenv("LARK_WEBHOOK_URL", ""),
             webhook_secret=os.getenv("LARK_WEBHOOK_SECRET", ""),
+            stability_retries=max(2, int(os.getenv("LARK_STABILITY_RETRIES", "4"))),
+            stability_delay_seconds=max(0.0, float(os.getenv("LARK_STABILITY_DELAY_SECONDS", "2"))),
+            filter_zero_rows=os.getenv("FILTER_ZERO_ROWS", "false").strip().lower() in {"1", "true", "yes", "on"},
         )
 
 
@@ -149,12 +156,11 @@ class LarkClient:
             f"{self.config.open_base_url}/open-apis/sheets/v2/spreadsheets/"
             f"{sheet_ref.spreadsheet_token}/values/{encoded_range}"
         )
-        # FormattedValue 让公式单元格返回计算结果，日期单元格返回 "6月1日" 这样的可读字符串，
-        # 而不是公式文本（如 'SUM(C3:C11)'）或日期序列号（如 46174）。
+        # UnformattedValue 让公式单元格返回已计算数值；日期序列号由 parse_date_cell 转换。
         resp = self.session.get(
             url,
             headers=self._headers(),
-            params={"valueRenderOption": "FormattedValue"},
+            params={"valueRenderOption": "UnformattedValue"},
             timeout=30,
         )
         data = self._checked_json(resp, "读取表格失败")
@@ -295,6 +301,10 @@ def parse_date_cell(value: Any) -> dt.date | None:
     if not text:
         return None
 
+    # UnformattedValue returns spreadsheet dates as Excel serial numbers.
+    if isinstance(value, (int, float)) and 1 <= value <= 100000:
+        return dt.date(1899, 12, 30) + dt.timedelta(days=int(value))
+
     compact = text.replace(" ", "")
     today_year = dt.date.today().year
     formats = (
@@ -407,6 +417,92 @@ def parse_budget_rows_by_date_columns(
         )
 
     return require_rows(rows), format_cn_date(today_date), format_cn_date(yesterday_date)
+
+
+def dedupe_duplicate_country_blocks(rows: list[BudgetRow]) -> list[BudgetRow]:
+    """删除内容完全重复的国家区块，避免表尾残留复制区块重复计入。"""
+    blocks: list[tuple[str, list[BudgetRow]]] = []
+    for row in rows:
+        if blocks and blocks[-1][0] == row.country:
+            blocks[-1][1].append(row)
+        else:
+            blocks.append((row.country, [row]))
+
+    seen: dict[tuple[str, frozenset[tuple[str, float, float]]], int] = {}
+    result: list[tuple[str, list[BudgetRow]]] = []
+    for country, block in blocks:
+        signature = frozenset((normalize_text(row.package).casefold(), row.today, row.yesterday) for row in block)
+        key = (country, signature)
+        previous_index = seen.get(key)
+        if previous_index is not None:
+            result.pop(previous_index)
+            seen = {k: (i if i < previous_index else i - 1) for k, i in seen.items() if i != previous_index}
+        seen[key] = len(result)
+        result.append((country, block))
+    return [row for _, block in result for row in block]
+
+
+def _declared_totals(values: list[list[Any]], header: tuple[int, int, int, list[tuple[dt.date, int]]]) -> tuple[float, float] | None:
+    """读取表格顶部的公式总计；没有可解析总计时返回 None。"""
+    if not values:
+        return None
+    _, _, _, date_cols = header
+    if len(date_cols) < 2:
+        return None
+    today_col = date_cols[0][1]
+    yesterday_col = date_cols[1][1]
+    first = list(values[0])
+    max_idx = max(today_col, yesterday_col)
+    if len(first) <= max_idx:
+        return None
+    first_today = first[today_col]
+    first_yesterday = first[yesterday_col]
+    if not isinstance(first_today, (int, float)) or not isinstance(first_yesterday, (int, float)):
+        return None
+    return float(first_today), float(first_yesterday)
+
+
+def _validated_values(values: list[list[Any]], today: dt.date) -> tuple[bool, tuple[tuple[str, str, float, float], ...]]:
+    header = find_column_header(values)
+    if header is None:
+        return True, tuple()
+    rows, _, _ = parse_budget_rows_by_date_columns(values, header)
+    rows = dedupe_duplicate_country_blocks(rows)
+    summary_rows = [row for row in rows if row.is_summary]
+    if not summary_rows:
+        return True, tuple((r.country, r.package, r.today, r.yesterday) for r in rows)
+    expected = (sum(row.today for row in summary_rows), sum(row.yesterday for row in summary_rows))
+    declared = _declared_totals(values, header)
+    if declared is not None and declared != expected:
+        return False, tuple((r.country, r.package, r.today, r.yesterday) for r in rows)
+    signature = tuple((r.country, r.package, r.today, r.yesterday) for r in rows)
+    return True, signature
+
+
+def load_stable_budget_data(
+    fetch_values: Any,
+    today: dt.date,
+    retries: int = 4,
+    delay_seconds: float = 2.0,
+    sleep_fn: Any = time.sleep,
+) -> list[list[Any]]:
+    """只在公式总计有效且连续两次读取完全一致时返回数据。"""
+    previous_signature: tuple[tuple[str, str, float, float], ...] | None = None
+    last_reason = ""
+    for attempt in range(max(2, retries)):
+        values = fetch_values()
+        valid, signature = _validated_values(values, today)
+        if not valid:
+            last_reason = "总计与明细汇总不一致，等待 Lark 公式刷新"
+        elif previous_signature is not None and signature == previous_signature:
+            return values
+        else:
+            last_reason = "连续两次读取内容不一致，等待 Lark 公式刷新"
+        if valid:
+            previous_signature = signature
+        if attempt + 1 < max(2, retries):
+            sleep_fn(delay_seconds)
+    raise RuntimeError(f"Lark 表格数据未稳定，已重试 {max(2, retries)} 次：{last_reason}。")
 
 
 def parse_budget_rows_by_date_rows(
@@ -732,9 +828,16 @@ def run_once(config: Config, send: bool = True) -> Path:
     sheet_ref = parse_sheet_url(config.sheet_url)
     client = LarkClient(config)
 
-    values = client.get_sheet_values(sheet_ref, config.sheet_range)
+    values = load_stable_budget_data(
+        lambda: client.get_sheet_values(sheet_ref, config.sheet_range),
+        today,
+        retries=config.stability_retries,
+        delay_seconds=config.stability_delay_seconds,
+    )
     rows, today_label, yesterday_label = parse_budget_rows(values, today)
-    rows = filter_zero_rows(rows)
+    rows = dedupe_duplicate_country_blocks(rows)
+    if config.filter_zero_rows:
+        rows = filter_zero_rows(rows)
     image_path = make_report_image(rows, today_label, yesterday_label, config.output_dir, today)
     text = build_summary_text(rows, today_label, yesterday_label)
     print(f"对比日期列: {today_label} vs {yesterday_label}")
