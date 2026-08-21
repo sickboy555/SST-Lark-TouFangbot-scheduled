@@ -95,7 +95,7 @@ class Config:
             webhook_secret=os.getenv("LARK_WEBHOOK_SECRET", ""),
             stability_retries=max(2, int(os.getenv("LARK_STABILITY_RETRIES", "4"))),
             stability_delay_seconds=max(0.0, float(os.getenv("LARK_STABILITY_DELAY_SECONDS", "2"))),
-            filter_zero_rows=os.getenv("FILTER_ZERO_ROWS", "false").strip().lower() in {"1", "true", "yes", "on"},
+            filter_zero_rows=os.getenv("FILTER_ZERO_ROWS", "true").strip().lower() in {"1", "true", "yes", "on"},
         )
 
 

@@ -37,3 +37,4 @@ jobs:
           SCHEDULE_TIME: '17:00'
           TIMEZONE: Asia/Shanghai
           OUTPUT_DIR: output
+          FILTER_ZERO_ROWS: 'true'
