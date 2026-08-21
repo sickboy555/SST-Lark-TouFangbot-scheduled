@@ -7,13 +7,14 @@ from lark_budget_bot import (
     BudgetRow,
     Config,
     dedupe_duplicate_country_blocks,
+    filter_zero_rows,
     load_stable_budget_data,
     parse_date_cell,
 )
 
 
 class BudgetParsingRegressionTests(unittest.TestCase):
-    def test_config_keeps_zero_rows_by_default(self):
+    def test_config_filters_zero_rows_by_default(self):
         with patch.dict(
             os.environ,
             {
@@ -22,11 +23,26 @@ class BudgetParsingRegressionTests(unittest.TestCase):
                 "LARK_SHEET_URL": "https://example.com/sheets/token?sheet=sheet",
                 "LARK_CHAT_ID": "chat",
                 "SEND_MODE": "app",
-                "FILTER_ZERO_ROWS": "false",
             },
             clear=False,
         ):
-            self.assertFalse(Config.from_env().filter_zero_rows)
+            os.environ.pop("FILTER_ZERO_ROWS", None)
+            self.assertTrue(Config.from_env().filter_zero_rows)
+
+    def test_filter_zero_rows_hides_only_two_day_zero_rows(self):
+        rows = [
+            BudgetRow("MX", "MX-001", 0, 0),
+            BudgetRow("MX", "MX-002", 100, 0),
+            BudgetRow("MX", "MX-003", 0, 100),
+            BudgetRow("MX", "MX_汇总", 100, 100),
+        ]
+
+        result = filter_zero_rows(rows)
+
+        self.assertEqual(
+            [(row.package, row.today, row.yesterday) for row in result],
+            [("MX-002", 100, 0), ("MX-003", 0, 100), ("MX_汇总", 100, 100)],
+        )
 
     def test_duplicate_country_blocks_keep_the_last_block(self):
         rows = [
